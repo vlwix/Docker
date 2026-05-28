@@ -38,27 +38,12 @@ jobs:
 
   deploy:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install sshpass
-        run: sudo apt-get install -y sshpass
-
-      - name: Copy project files to server
-        env:
-          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+      - name: Build and start
         run: |
-          sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@212.192.134.135 \
-            "mkdir -p ~/docker"
-          sshpass -e scp -o StrictHostKeyChecking=no -P 58529 -r \
-            Dockerfile docker-compose.yml pyproject.toml src \
-            hoover@212.192.134.135:~/docker/
-
-      - name: Build and start on server
-        env:
-          SSHPASS: ${{ secrets.SSH_PASSWORD }}
-        run: |
-          sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@212.192.134.135 \
-            "cd ~/docker && docker compose up -d --build --wait"
+          cp -r Dockerfile docker-compose.yml pyproject.toml src ~/docker/
+          cd ~/docker && docker compose up -d --build --wait
