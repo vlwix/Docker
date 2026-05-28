@@ -50,15 +50,15 @@ jobs:
         env:
           SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
-          sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@kubsu.tyvik.ru \
+          sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@212.192.134.135 \
             "mkdir -p ~/docker"
           sshpass -e scp -o StrictHostKeyChecking=no -P 58529 -r \
             Dockerfile docker-compose.yml pyproject.toml src \
-            hoover@kubsu.tyvik.ru:~/docker/
+            hoover@212.192.134.135:~/docker/
 
       - name: Build and start on server
         env:
           SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
-          sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@kubsu.tyvik.ru \
+          sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@212.192.134.135 \
             "cd ~/docker && docker compose up -d --build --wait"
