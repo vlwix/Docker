@@ -13,6 +13,7 @@ RUN /venv/bin/pip install --no-cache-dir \
     "httpx==0.28.1"
 COPY . .
 ENV PATH="/venv/bin:$PATH"
+ENV PYTHONPATH="/app"
 CMD ["pytest", "tests", "-v"]
 
 # Stage 3: production image — minimal, without test deps
