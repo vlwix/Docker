@@ -1,0 +1,50 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build --target test -t app:test .
+
+      - name: Run tests in built image with PostgreSQL
+        run: |
+          docker network create testnet
+
+          docker run -d --name db --network testnet \
+            -e POSTGRES_DB=testdb \
+            -e POSTGRES_USER=testuser \
+            -e POSTGRES_PASSWORD=testpass \
+            postgres:16-alpine
+
+          until docker exec db pg_isready -U testuser; do sleep 1; done
+
+          docker run --rm --network testnet \
+            -e DATABASE_URL=postgresql+psycopg://testuser:testpass@db:5432/testdb \
+            app:test
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f db || true
+          docker network rm testnet || true
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to server via SSH
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          sudo apt-get install -y sshpass
+          sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@kubsu.tyvik.ru \
+            "cd ~/docker && git pull && docker compose up -d --build --wait"
