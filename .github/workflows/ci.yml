@@ -43,7 +43,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and start
+      - name: Build production image
         run: |
-          cp -r Dockerfile docker-compose.yml pyproject.toml src ~/docker/
-          cd ~/docker && docker compose up -d --build --wait
+          docker build --target production -t localhost/app:latest .
+          docker save localhost/app:latest | gzip > app.tar.gz
+
+      - name: Transfer postgres image on first deploy
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          DB_EXISTS=$(sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 \
+            hoover@212.192.134.135 \
+            "podman ps -a --filter name=db --format '{{.Names}}' 2>/dev/null" || echo "")
+          if [ -z "$DB_EXISTS" ]; then
+            docker pull postgres:16-alpine
+            docker tag postgres:16-alpine localhost/postgres:16-alpine
+            docker save localhost/postgres:16-alpine | gzip > postgres.tar.gz
+            sshpass -e scp -o StrictHostKeyChecking=no -P 58529 \
+              postgres.tar.gz hoover@212.192.134.135:~/postgres.tar.gz
+          fi
+
+      - name: Copy app image to server
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          sshpass -e scp -o StrictHostKeyChecking=no -P 58529 \
+            app.tar.gz hoover@212.192.134.135:~/app.tar.gz
+
+      - name: Deploy on server with podman
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@212.192.134.135 '
+            set -e
+
+            podman network create appnet 2>/dev/null || true
+
+            # Bootstrap postgres on first deploy
+            if ! podman ps --filter name=db --format "{{.Names}}" | grep -q db; then
+              if [ -f ~/postgres.tar.gz ]; then
+                gunzip -c ~/postgres.tar.gz | podman load
+              fi
+              podman run -d --name db --network appnet \
+                -e POSTGRES_DB=kubsu \
+                -e POSTGRES_USER=kubsu \
+                -e POSTGRES_PASSWORD=kubsu \
+                -v pgdata:/var/lib/postgresql/data \
+                localhost/postgres:16-alpine
+              until podman exec db pg_isready -U kubsu; do sleep 2; done
+            fi
+
+            # Load new app image
+            gunzip -c ~/app.tar.gz | podman load
+
+            # Restart app container
+            podman stop app 2>/dev/null || true
+            podman rm   app 2>/dev/null || true
+            podman run -d --name app --network appnet \
+              -p 8063:8063 \
+              -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@db:5432/kubsu \
+              localhost/app:latest
+          '
+
+      - name: Cleanup local files
+        if: always()
+        run: rm -f app.tar.gz postgres.tar.gz
