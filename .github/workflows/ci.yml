@@ -61,25 +61,11 @@ jobs:
         run: |
           sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@212.192.134.135 '
             set -e
-            podman network create appnet 2>/dev/null || true
-
-            if ! podman ps --filter name=db --format "{{.Names}}" | grep -q db; then
-              podman rm db 2>/dev/null || true
-              podman run -d --name db --network appnet \
-                -e POSTGRES_DB=kubsu \
-                -e POSTGRES_USER=kubsu \
-                -e POSTGRES_PASSWORD=kubsu \
-                -v pgdata:/var/lib/postgresql/data \
-                localhost/postgres:16-alpine
-              until podman exec db pg_isready -U kubsu; do sleep 2; done
-            fi
-
             gunzip -c ~/app.tar.gz | podman load
             podman stop app 2>/dev/null || true
             podman rm   app 2>/dev/null || true
-            podman run -d --name app --network appnet \
-              -p 8063:8063 \
-              -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@db:5432/kubsu \
+            podman run -d --name app --network host \
+              -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@127.0.0.1:5432/kubsu \
               localhost/app:latest
           '
 
