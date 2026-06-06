@@ -1,0 +1,74 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/docker-app
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build --target test -t docker-app:test .
+
+      - name: Run pytest in built image with Postgres
+        run: docker compose run --rm test
+
+      - name: Build prod img after tests
+        run: docker build --target runtime -t docker-app:latest .
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        if: github.event_name == 'push'
+        run: |
+          IMAGE="${{ env.IMAGE_NAME }}"
+          docker tag docker-app:latest "${IMAGE}:latest"
+          docker tag docker-app:latest "${IMAGE}:${{ github.sha }}"
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${{ github.sha }}"
+
+  deploy:
+    needs: test
+    runs-on: self-hosted
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy on server (pull from GHCR)
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          IMAGE: ${{ env.IMAGE_NAME }}:latest
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/kubsu_deploy
+          chmod 600 ~/.ssh/kubsu_deploy
+          ssh-keyscan -p 58529 kubsu.tyvik.ru >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/kubsu_deploy -p 58529 -o StrictHostKeyChecking=accept-new hoover@kubsu.tyvik.ru \
+            "bash -lc '
+            printf \"%s\" \"${GHCR_TOKEN}\" | podman login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin
+            podman pull \"${IMAGE}\"
+            podman stop docker-app 2>/dev/null || true
+            podman rm docker-app 2>/dev/null || true
+            podman run -d --name docker-app --network host \
+              -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@127.0.0.1:5432/kubsu \
+              -e PORT=8066 \
+              \"${IMAGE}\"'"

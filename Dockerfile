@@ -1,26 +1,41 @@
-# Stage 1: build production dependencies
+# builder: ставим только runtime-зависимости приложения в venv
 FROM python:3.12-slim AS builder
+
 WORKDIR /app
+
 COPY pyproject.toml .
-RUN python -m venv /venv && \
-    /venv/bin/pip install --no-cache-dir .
-
-# Stage 2: test image — adds test deps on top of builder
-FROM builder AS test
-RUN /venv/bin/pip install --no-cache-dir \
-    "pytest>=6.2.5" \
-    "pytest-asyncio==0.25.3" \
-    "httpx==0.28.1"
-COPY . .
-ENV PATH="/venv/bin:$PATH"
-ENV PYTHONPATH="/app"
-CMD ["pytest", "tests", "-v"]
-
-# Stage 3: production image — minimal, without test deps
-FROM python:3.12-slim AS production
-WORKDIR /app
-COPY --from=builder /venv /venv
 COPY src/ ./src/
-ENV PATH="/venv/bin:$PATH"
-EXPOSE 8063
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8063"]
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir .
+
+# runtime: финальный образ для podman/production (без тестов и pytest)
+FROM python:3.12-slim AS runtime
+
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+COPY --from=builder /app/src ./src
+
+ENV PORT=8066
+EXPOSE 8066
+
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+CMD ["sh", "-c", "exec uvicorn src.main:app --host 0.0.0.0 --port ${PORT}"]
+
+# test: слой только для CI (pytest + код тестов)
+FROM runtime AS test
+
+USER root
+COPY pyproject.toml .
+COPY tests/ ./tests/
+RUN pip install --no-cache-dir ".[test]" \
+    && chown -R appuser:appuser /app/tests
+USER appuser
+
+WORKDIR /app
+CMD ["python", "-m", "pytest", "tests", "-v"]
