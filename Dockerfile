@@ -19,8 +19,8 @@ COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 COPY --from=builder /app/src ./src
 
-ENV PORT=8066
-EXPOSE 8066
+ENV PORT=8063
+EXPOSE 8063
 
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
