@@ -11,64 +11,94 @@ permissions:
   packages: write
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/docker-app
+  IMAGE: ghcr.io/${{ github.repository_owner }}/docker-app
 
 jobs:
   test:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Build test image
-        run: docker build --target test -t docker-app:test .
+        run: docker build --target test -t app:test .
 
-      - name: Run pytest in built image with Postgres
-        run: docker compose run --rm test
+      - name: Run tests in built image with PostgreSQL
+        run: |
+          docker network create testnet
+          docker run -d --name db --network testnet \
+            -e POSTGRES_DB=testdb \
+            -e POSTGRES_USER=testuser \
+            -e POSTGRES_PASSWORD=testpass \
+            postgres:16-alpine
+          until docker exec db pg_isready -U testuser; do sleep 1; done
+          docker run --rm --network testnet \
+            -e DATABASE_URL=postgresql+psycopg://testuser:testpass@db:5432/testdb \
+            app:test
 
-      - name: Build prod img after tests
-        run: docker build --target runtime -t docker-app:latest .
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f db || true
+          docker network rm testnet || true
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push image to GHCR
+      - name: Build and push prod image to GHCR
         if: github.event_name == 'push'
         run: |
-          IMAGE="${{ env.IMAGE_NAME }}"
-          docker tag docker-app:latest "${IMAGE}:latest"
-          docker tag docker-app:latest "${IMAGE}:${{ github.sha }}"
-          docker push "${IMAGE}:latest"
-          docker push "${IMAGE}:${{ github.sha }}"
+          docker build --target runtime \
+            -t ${{ env.IMAGE }}:latest \
+            -t ${{ env.IMAGE }}:${{ github.sha }} .
+          docker push ${{ env.IMAGE }}:latest
+          docker push ${{ env.IMAGE }}:${{ github.sha }}
 
   deploy:
     needs: test
     runs-on: self-hosted
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'push'
+
     steps:
-      - name: Deploy on server (pull from GHCR)
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_ACTOR: ${{ github.actor }}
-          IMAGE: ${{ env.IMAGE_NAME }}:latest
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image from GHCR and save as tar
         run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/kubsu_deploy
-          chmod 600 ~/.ssh/kubsu_deploy
-          ssh-keyscan -p 58529 kubsu.tyvik.ru >> ~/.ssh/known_hosts 2>/dev/null || true
-          ssh -i ~/.ssh/kubsu_deploy -p 58529 -o StrictHostKeyChecking=accept-new hoover@kubsu.tyvik.ru \
-            "bash -lc '
-            printf \"%s\" \"${GHCR_TOKEN}\" | podman login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin
-            podman pull \"${IMAGE}\"
-            podman stop docker-app 2>/dev/null || true
-            podman rm docker-app 2>/dev/null || true
-            podman run -d --name docker-app --network host \
+          docker pull ${{ env.IMAGE }}:latest
+          docker save ${{ env.IMAGE }}:latest | gzip > app.tar.gz
+
+      - name: Copy image to server
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          sshpass -e scp -o StrictHostKeyChecking=no -P 58529 \
+            app.tar.gz hoover@212.192.134.135:~/app.tar.gz
+
+      - name: Deploy on server with podman
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+          IMAGE: ${{ env.IMAGE }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=no -p 58529 hoover@212.192.134.135 "
+            set -e
+            gunzip -c ~/app.tar.gz | podman load
+            podman stop app 2>/dev/null || true
+            podman rm   app 2>/dev/null || true
+            podman run -d --name app --network host \
               -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@127.0.0.1:5432/kubsu \
-              -e PORT=8066 \
-              \"${IMAGE}\"'"
+              ${IMAGE}:latest
+          "
+
+      - name: Cleanup
+        if: always()
+        run: rm -f app.tar.gz
